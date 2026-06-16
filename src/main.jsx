@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Activity,
@@ -83,12 +83,59 @@ const seedMessages = [
   { id: 2, side: "right", text: "Sure, please share your city and monthly budget." }
 ];
 
+const API_URL = `${window.location.protocol}//${window.location.hostname}:5000/api`;
+
+async function apiRequest(path, options = {}) {
+  const token = localStorage.getItem("dgi_token");
+  const response = await fetch(`${API_URL}${path}`, {
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...options.headers
+    }
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ message: "Request failed" }));
+    throw new Error(error.message || "Request failed");
+  }
+
+  return response.json();
+}
+
+async function ensureDemoSession() {
+  if (localStorage.getItem("dgi_token")) return;
+  const session = await apiRequest("/demo/session", { method: "POST", body: JSON.stringify({}) });
+  localStorage.setItem("dgi_token", session.token);
+}
+
+async function refreshDemoSession() {
+  localStorage.removeItem("dgi_token");
+  await ensureDemoSession();
+}
+
+function leadToContact(lead) {
+  return {
+    id: lead._id || lead.id,
+    name: lead.name || "",
+    phone: lead.phone || "",
+    email: lead.email || "",
+    tags: lead.source || "manual",
+    group: lead.company || "",
+    status: labelize(lead.stage || "new"),
+    createdTime: lead.createdAt ? new Date(lead.createdAt).toLocaleString("en-IN", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" }) : nowText()
+  };
+}
+
 function App() {
   const [role, setRole] = useState("admin");
   const [active, setActive] = useState("dashboard");
   const [toast, setToast] = useState("");
   const [contacts, setContacts] = useState(seedContacts);
+  const [contactFormOpen, setContactFormOpen] = useState(false);
   const [users, setUsers] = useState(seedUsers);
+  const [userFormOpen, setUserFormOpen] = useState(false);
   const [messages, setMessages] = useState(seedMessages);
   const [numbers, setNumbers] = useState([
     { id: "NUM-001", phone: "+91 98765 43210", wabaId: "WABA-8291", status: "Active", assignedTo: "Riya Sen" },
@@ -105,6 +152,34 @@ function App() {
   const currentRole = roleConfig[role];
   const visibleNav = nav.filter(([id]) => currentRole.allowed.includes(id));
 
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadLeads() {
+      try {
+        await ensureDemoSession();
+        let leads;
+        try {
+          leads = await apiRequest("/leads");
+        } catch (error) {
+          if (!error.message.toLowerCase().includes("token")) throw error;
+          await refreshDemoSession();
+          leads = await apiRequest("/leads");
+        }
+        if (!cancelled) {
+          setContacts(leads.length ? leads.map(leadToContact) : seedContacts);
+        }
+      } catch (error) {
+        notify(`Mongo sync unavailable: ${error.message}`);
+      }
+    }
+
+    loadLeads();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   function notify(text) {
     setToast(text);
     setAudit((items) => [{ id: Date.now(), event: text, actor: currentRole.label, time: nowText() }, ...items]);
@@ -115,6 +190,33 @@ function App() {
     setRole(nextRole);
     if (!roleConfig[nextRole].allowed.includes(active)) {
       setActive("dashboard");
+    }
+  }
+
+  function handleQuickAction(action) {
+    if (action === "broadcasts") {
+      setActive("broadcasts");
+      notify("Open Broadcasts");
+      return;
+    }
+
+    if (action === "contacts") {
+      setActive("contacts");
+      setContactFormOpen(true);
+      notify("Add lead form opened");
+      return;
+    }
+
+    if (action === "users") {
+      setActive("users");
+      setUserFormOpen(true);
+      notify("Add user form opened");
+      return;
+    }
+
+    if (action === "numbers") {
+      setActive("numbers");
+      notify("Open WhatsApp Numbers");
     }
   }
 
@@ -175,10 +277,10 @@ function App() {
           <MobileTabs visibleNav={visibleNav} active={active} setActive={setActive} />
           <RoleNotice role={currentRole} />
           {active === "super" && <SuperAdmin users={users} numbers={numbers} notify={notify} />}
-          {active === "dashboard" && <Dashboard contacts={contacts} users={users} messages={messages} broadcasts={broadcasts} />}
-          {active === "users" && <SubUsers users={users} setUsers={setUsers} notify={notify} />}
+          {active === "dashboard" && <Dashboard contacts={contacts} users={users} messages={messages} broadcasts={broadcasts} onQuickAction={handleQuickAction} />}
+          {active === "users" && <SubUsers users={users} setUsers={setUsers} notify={notify} showForm={userFormOpen} setShowForm={setUserFormOpen} />}
           {active === "numbers" && <Numbers numbers={numbers} setNumbers={setNumbers} users={users} notify={notify} />}
-          {active === "contacts" && <Contacts contacts={contacts} setContacts={setContacts} notify={notify} />}
+          {active === "contacts" && <Contacts contacts={contacts} setContacts={setContacts} notify={notify} showForm={contactFormOpen} setShowForm={setContactFormOpen} />}
           {active === "inbox" && <InboxView messages={messages} setMessages={setMessages} users={users} notify={notify} />}
           {active === "broadcasts" && <Broadcasts broadcasts={broadcasts} setBroadcasts={setBroadcasts} templates={templates} notify={notify} />}
           {active === "templates" && <Templates templates={templates} setTemplates={setTemplates} notify={notify} />}
@@ -215,7 +317,14 @@ function MobileTabs({ visibleNav, active, setActive }) {
   );
 }
 
-function Dashboard({ contacts, users, messages, broadcasts }) {
+function Dashboard({ contacts, users, messages, broadcasts, onQuickAction }) {
+  const quickActions = [
+    { label: "New Broadcast", action: "broadcasts" },
+    { label: "New Contact", action: "contacts" },
+    { label: "Add User", action: "users" },
+    { label: "Connect WhatsApp Number", action: "numbers" }
+  ];
+
   return (
     <div className="space-y-5">
       <div className="grid gap-4 md:grid-cols-4">
@@ -225,13 +334,20 @@ function Dashboard({ contacts, users, messages, broadcasts }) {
         <Metric label="Broadcasts" value={broadcasts.length} />
       </div>
       <div className="grid gap-5 xl:grid-cols-[1.2fr_.8fr]">
-        <Panel title="Latest Leeds">
+        <Panel title="Latest Leads">
           <ContactTable contacts={contacts.slice(0, 5)} />
         </Panel>
         <Panel title="Quick Actions">
           <div className="grid gap-3">
-            {["New Broadcast", "New Contact", "Add User", "Connect WhatsApp Number"].map((item) => (
-              <div key={item} className="rounded-lg border border-slate-200 bg-slate-50 p-4 font-bold">{item}</div>
+            {quickActions.map((item) => (
+              <button
+                key={item.label}
+                onClick={() => onQuickAction(item.action)}
+                className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 p-4 text-left font-bold hover:border-slate-900 hover:bg-white"
+              >
+                {item.label}
+                <Plus size={17} />
+              </button>
             ))}
           </div>
         </Panel>
@@ -260,8 +376,7 @@ function SuperAdmin({ users, numbers, notify }) {
   );
 }
 
-function SubUsers({ users, setUsers, notify }) {
-  const [showForm, setShowForm] = useState(false);
+function SubUsers({ users, setUsers, notify, showForm, setShowForm }) {
   const [form, setForm] = useState({ name: "", email: "", password: "", role: "Agent", assignedNumber: "", assignedGroup: "", permissions: ["View Contacts", "Send Messages"] });
 
   function togglePermission(permission) {
@@ -346,24 +461,52 @@ function Numbers({ numbers, setNumbers, users, notify }) {
   );
 }
 
-function Contacts({ contacts, setContacts, notify }) {
-  const [showForm, setShowForm] = useState(false);
+function Contacts({ contacts, setContacts, notify, showForm, setShowForm }) {
   const [selected, setSelected] = useState([]);
   const [form, setForm] = useState(makeEmptyContact());
+  const [saving, setSaving] = useState(false);
 
-  function saveContact(event) {
+  async function saveContact(event) {
     event.preventDefault();
-    setContacts((items) => [{ ...form, createdTime: form.createdTime || nowText() }, ...items]);
-    setForm(makeEmptyContact());
-    setShowForm(false);
-    notify("Contact saved");
+    setSaving(true);
+
+    try {
+      await ensureDemoSession();
+      const payload = {
+        name: form.name,
+        phone: form.phone,
+        email: form.email,
+        company: form.group,
+        source: "manual",
+        stage: form.status || "new",
+        rawPayload: { localId: form.id, tags: form.tags, createdTime: form.createdTime }
+      };
+      let lead;
+
+      try {
+        lead = await apiRequest("/leads", { method: "POST", body: JSON.stringify(payload) });
+      } catch (error) {
+        if (!error.message.toLowerCase().includes("token")) throw error;
+        await refreshDemoSession();
+        lead = await apiRequest("/leads", { method: "POST", body: JSON.stringify(payload) });
+      }
+
+      setContacts((items) => [leadToContact(lead), ...items]);
+      setForm(makeEmptyContact());
+      setShowForm(false);
+      notify("Lead saved in MongoDB");
+    } catch (error) {
+      notify(`Lead not saved: ${error.message}`);
+    } finally {
+      setSaving(false);
+    }
   }
 
   return (
-    <Panel title="Leeds / CRM">
+    <Panel title="Leads / CRM">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <button onClick={() => setShowForm((value) => !value)} className="flex h-10 items-center gap-2 rounded-lg bg-slate-900 px-4 text-sm font-bold text-white">
-          <Plus size={17} /> Add Leeds
+          <Plus size={17} /> Add Lead
         </button>
         <div className="flex items-center gap-2">
           <span className="mr-2 text-sm font-semibold text-slate-500">{selected.length} selected</span>
@@ -386,7 +529,9 @@ function Contacts({ contacts, setContacts, notify }) {
             <Field label="Created time" value={form.createdTime} onChange={(value) => setForm({ ...form, createdTime: value })} />
             <SelectField label="Status" value={form.status} onChange={(value) => setForm({ ...form, status: value })} options={["Active", "Pending", "Inactive", "Converted"]} />
           </div>
-          <button className="mt-4 h-10 rounded-lg bg-slate-900 px-5 text-sm font-bold text-white">Save contact</button>
+          <button disabled={saving} className="mt-4 h-10 rounded-lg bg-slate-900 px-5 text-sm font-bold text-white disabled:cursor-not-allowed disabled:bg-slate-400">
+            {saving ? "Saving..." : "Save lead"}
+          </button>
         </form>
       )}
       <ContactTable contacts={contacts} selected={selected} setSelected={setSelected} />

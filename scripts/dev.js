@@ -1,6 +1,7 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 
 const isWindows = process.platform === "win32";
+let stopping = false;
 
 const commands = [
   ["server", "npm run server"],
@@ -15,8 +16,10 @@ const children = commands.map(([name, command]) => {
   });
 
   child.on("exit", (code) => {
-    if (code !== 0) {
+    if (!stopping && code !== 0) {
       console.error(`${name} exited with code ${code}`);
+      stopAll();
+      process.exit(code || 1);
     }
   });
 
@@ -24,9 +27,21 @@ const children = commands.map(([name, command]) => {
 });
 
 function stopAll() {
+  stopping = true;
   for (const child of children) {
-    child.kill();
+    stopChild(child);
   }
+}
+
+function stopChild(child) {
+  if (child.killed) return;
+
+  if (isWindows) {
+    execFile("taskkill", ["/pid", String(child.pid), "/T", "/F"], () => {});
+    return;
+  }
+
+  child.kill();
 }
 
 process.on("SIGINT", () => {

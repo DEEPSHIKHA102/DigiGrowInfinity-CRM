@@ -12,7 +12,6 @@ A Zoho-inspired CRM starter for agencies that manage Meta leads, WhatsApp conver
 
 ```bash
 npm install
-copy .env.example .env
 npm run dev
 ```
 

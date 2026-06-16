@@ -13,7 +13,25 @@ const jwtSecret = process.env.JWT_SECRET || "dev-secret-change-me";
 
 app.use(
   cors({
-    origin: process.env.CLIENT_URL || "http://127.0.0.1:5173" 
+    origin(origin, callback) {
+      if (!origin) {
+        callback(null, true);
+        return;
+      }
+
+      const allowedOrigins = new Set([
+        process.env.CLIENT_URL,
+        "http://localhost:5173",
+        "http://127.0.0.1:5173"
+      ].filter(Boolean));
+
+      if (allowedOrigins.has(origin) || /^http:\/\/192\.168\.\d{1,3}\.\d{1,3}:5173$/.test(origin)) {
+        callback(null, true);
+        return;
+      }
+
+      callback(new Error(`CORS blocked for origin ${origin}`));
+    }
   })
 );
 app.use(express.json({ limit: "2mb" }));
@@ -236,6 +254,34 @@ app.post("/api/demo/messages", (req, res) => {
   const message = { id: Date.now(), ...req.body, createdAt: new Date().toISOString() };
   demoStore.messages.push(message);
   res.status(201).json(message);
+});
+
+app.post("/api/demo/session", async (_req, res) => {
+  const org = await Organization.findOneAndUpdate(
+    { name: "DigiGrowInfinity Demo" },
+    { $setOnInsert: { name: "DigiGrowInfinity Demo", plan: "Agency Pro" } },
+    { upsert: true, new: true }
+  );
+  const passwordHash = await bcrypt.hash("demo-password", 10);
+  const user = await User.findOneAndUpdate(
+    { email: "demo@digigrowinfinity.com" },
+    {
+      $setOnInsert: {
+        orgId: org._id,
+        name: "Demo Admin",
+        email: "demo@digigrowinfinity.com",
+        passwordHash,
+        role: "admin",
+        permissions: ["dashboard", "inbox", "leads", "campaigns", "whatsapp", "meta", "chatbot", "analytics", "team"]
+      }
+    },
+    { upsert: true, new: true }
+  );
+
+  res.json({
+    token: createToken(user),
+    user: { id: user._id, name: user.name, email: user.email, role: user.role, orgId: user.orgId }
+  });
 });
 
 app.post("/api/auth/register", async (req, res) => {
